@@ -1,9 +1,9 @@
-name: Android CI - Minimal Debug APK
+name: Android CI - Minimal Debug APK (Java 17)
 
 on:
   push:
     branches:
-      - main        # change to your branch(es) as needed
+      - main
   pull_request:
     branches:
       - main
@@ -16,11 +16,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 11
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '11'
+          distribution: 'temurin'   # AdoptOpenJDK/Temurin — works well; you can use 'zulu' or other vendors
+          java-version: '17'
+
+      - name: Print Java & Gradle versions (sanity check)
+        run: |
+          java -version
+          echo "JAVA_HOME = $JAVA_HOME"
+          ./gradlew --version
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
