@@ -1,4 +1,4 @@
-name: Android CI - Build Debug APK (verbose) & Update PR Comment
+name: Android CI - Debug APK with PR Comment
 
 on:
   pull_request:
@@ -12,9 +12,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  build-and-report:
+  build-and-comment:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -23,112 +22,68 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Ensure Android SDK packages
-        env:
-          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-        run: |
-          sudo mkdir -p $ANDROID_SDK_ROOT
-          sudo chown $USER $ANDROID_SDK_ROOT
-          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "platforms;android-33" "build-tools;33.0.2" || true
-          sdkmanager --list | sed -n '1,200p'
+          distribution: temurin
+          java-version: 17
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Print Java & Gradle versions (sanity)
-        run: |
-          java -version
-          echo "JAVA_HOME = $JAVA_HOME"
-          ./gradlew --version
+      - name: Build Debug APK
+        run: ./gradlew clean assembleDebug --no-daemon
 
-      - name: Build Debug APK (verbose, capture logs)
-        run: |
-          chmod +x ./gradlew
-          ./gradlew clean assembleDebug --no-daemon --stacktrace --info 2>&1 | tee gradle-build.log || true
-        continue-on-error: true
-
-      - name: Upload Gradle build log
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-build-log
-          path: gradle-build.log
-
-      - name: Upload Debug APK artifact (if present)
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
           path: app/build/outputs/apk/debug/*.apk
 
-      - name: Create or update PR comment with artifact link
+      - name: Create or Update PR Comment with Artifact Link
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const marker = "<!-- apk-comment -->";
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const runId = context.runId;
-            const artifactName = "app-debug-apk";
-            const marker = "<!-- apk-comment -->";
+            const issue_number = context.issue.number;
 
-            // 1) List artifacts for this workflow run
-            const resp = await github.rest.actions.listWorkflowRunArtifacts({
-              owner, repo, run_id: runId,
+            // PR comment will always point to the workflow run artifacts page
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            // Build comment body safely (no YAML issues)
+            const body = [
+              marker,
+              "### 🚀 Debug APK is Ready",
+              "Download the APK from the workflow artifacts:",
+              `🔗 ${runUrl}`,
+              "",
+              "(This comment is auto-updated on every push)"
+            ].join("\n");
+
+            // 1. Fetch existing PR comments
+            const comments = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
             });
 
-            const artifacts = resp.data.artifacts || [];
-            const art = artifacts.find(a => a.name === artifactName && !a.expired);
+            const existing = comments.data.find(c => c.body && c.body.includes(marker));
 
-            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
-
-            // Build the comment body
-            let body;
-            if (!art) {
-              body = `${marker}\n⚠️ Could not find artifact **${artifactName}** for this run.\n\nView the workflow run: ${runUrl}`;
+            // 2. Update if exists, otherwise create new
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body
+              });
             } else {
-              const downloadApiUrl = `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${art.id}/zip`;
-              const niceSize = (bytes => {
-                if (!bytes) return 'unknown';
-                const units = ['B','KB','MB','GB'];
-                let i = 0;
-                while(bytes >= 1024 && i < units.length-1) { bytes /= 1024; i++; }
-                return `${bytes.toFixed(2)} ${units[i]}`;
-              })(art.size_in_bytes || 0);
-
-              body = `${marker}
-### 📱 Debug APK Ready
-  **Artifact:** ${artifactName}
-  **Size:** ${niceSize}
-  **Download (API redirect):** ${downloadApiUrl}
-  
-  (You may need to be logged into GitHub and have access to the repository.)`;
-  }
-
-  // 2) Search for existing comment containing the marker
-  const issue_number = context.issue.number;
-  const commentsResp = await github.rest.issues.listComments({
-owner, repo, issue_number, per_page: 100
-});
-  
-  const existing = commentsResp.data.find(c => c.body && c.body.includes(marker));
-  
-  if (existing) {
-  // Update existing comment
-  await github.rest.issues.updateComment({
-  owner,
-  repo,
-comment_id: existing.id,
-  body
-});
-} else {
-  // Create new comment (with marker)
-  await github.rest.issues.createComment({
-  owner,
-  repo,
-  issue_number,
-  body
-});
-}
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+            }
