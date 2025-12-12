@@ -1,15 +1,18 @@
-name: Android CI - Minimal Debug APK (Java 17)
+name: Android CI - Debug APK with PR Comment
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
-  build-debug:
+  build-and-comment:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,14 +22,8 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'   # AdoptOpenJDK/Temurin — works well; you can use 'zulu' or other vendors
-          java-version: '17'
-
-      - name: Print Java & Gradle versions (sanity check)
-        run: |
-          java -version
-          echo "JAVA_HOME = $JAVA_HOME"
-          ./gradlew --version
+          distribution: temurin
+          java-version: 17
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
@@ -39,3 +36,54 @@ jobs:
         with:
           name: app-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+
+      - name: Create or Update PR Comment with Artifact Link
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const marker = "<!-- apk-comment -->";
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.issue.number;
+
+            // PR comment will always point to the workflow run artifacts page
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            // Build comment body safely (no YAML issues)
+            const body = [
+              marker,
+              "### 🚀 Debug APK is Ready",
+              "Download the APK from the workflow artifacts:",
+              `🔗 ${runUrl}`,
+              "",
+              "(This comment is auto-updated on every push)"
+            ].join("\n");
+
+            // 1. Fetch existing PR comments
+            const comments = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+
+            const existing = comments.data.find(c => c.body && c.body.includes(marker));
+
+            // 2. Update if exists, otherwise create new
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+            }
