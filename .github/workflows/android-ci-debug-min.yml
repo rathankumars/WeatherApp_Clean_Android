@@ -1,17 +1,20 @@
-name: Android CI - Build Debug APK + Post Direct Artifact Link
+name: Android CI - Build Debug APK (verbose) & Update PR Comment
 
 on:
   pull_request:
-    branches: [ main ]    # change to your target branch(es)
+    branches: [ main ]
   push:
     branches: [ main ]
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
-  build-and-comment:
+  build-and-report:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -23,36 +26,109 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Ensure Android SDK packages
+        env:
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: |
+          sudo mkdir -p $ANDROID_SDK_ROOT
+          sudo chown $USER $ANDROID_SDK_ROOT
+          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "platforms;android-33" "build-tools;33.0.2" || true
+          sdkmanager --list | sed -n '1,200p'
+
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew clean assembleDebug --no-daemon
+      - name: Print Java & Gradle versions (sanity)
+        run: |
+          java -version
+          echo "JAVA_HOME = $JAVA_HOME"
+          ./gradlew --version
 
-      - name: Upload Debug APK artifact
+      - name: Build Debug APK (verbose, capture logs)
+        run: |
+          chmod +x ./gradlew
+          ./gradlew clean assembleDebug --no-daemon --stacktrace --info 2>&1 | tee gradle-build.log || true
+        continue-on-error: true
+
+      - name: Upload Gradle build log
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-build-log
+          path: gradle-build.log
+
+      - name: Upload Debug APK artifact (if present)
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
           path: app/build/outputs/apk/debug/*.apk
 
-      # --- Post a direct download URL for the artifact to the PR conversation ---
-      - name: Post direct artifact download link to PR
+      - name: Create or update PR comment with artifact link
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/github-script@v7
         with:
-          # MUST use a PAT for forked PRs; store PAT in repo secrets as PAT_TOKEN (repo scope)
-          github-token: ${{ secrets.PAT_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const runId = context.runId;
             const artifactName = "app-debug-apk";
+            const marker = "<!-- apk-comment -->";
 
-            // List artifacts for this workflow run
-            const response = await github.rest.actions.listWorkflowRunArtifacts({
-              owner,
-              repo,
-              run_id: runId,
+            // 1) List artifacts for this workflow run
+            const resp = await github.rest.actions.listWorkflowRunArtifacts({
+              owner, repo, run_id: runId,
             });
 
-            const artifacts = response.data.artifacts || [];
+            const artifacts = resp.data.artifacts || [];
+            const art = artifacts.find(a => a.name === artifactName && !a.expired);
+
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
+
+            // Build the comment body
+            let body;
+            if (!art) {
+              body = `${marker}\n⚠️ Could not find artifact **${artifactName}** for this run.\n\nView the workflow run: ${runUrl}`;
+            } else {
+              const downloadApiUrl = `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${art.id}/zip`;
+              const niceSize = (bytes => {
+                if (!bytes) return 'unknown';
+                const units = ['B','KB','MB','GB'];
+                let i = 0;
+                while(bytes >= 1024 && i < units.length-1) { bytes /= 1024; i++; }
+                return `${bytes.toFixed(2)} ${units[i]}`;
+              })(art.size_in_bytes || 0);
+
+              body = `${marker}
+### 📱 Debug APK Ready
+  **Artifact:** ${artifactName}
+  **Size:** ${niceSize}
+  **Download (API redirect):** ${downloadApiUrl}
+  
+  (You may need to be logged into GitHub and have access to the repository.)`;
+  }
+
+  // 2) Search for existing comment containing the marker
+  const issue_number = context.issue.number;
+  const commentsResp = await github.rest.issues.listComments({
+owner, repo, issue_number, per_page: 100
+});
+  
+  const existing = commentsResp.data.find(c => c.body && c.body.includes(marker));
+  
+  if (existing) {
+  // Update existing comment
+  await github.rest.issues.updateComment({
+  owner,
+  repo,
+comment_id: existing.id,
+  body
+});
+} else {
+  // Create new comment (with marker)
+  await github.rest.issues.createComment({
+  owner,
+  repo,
+  issue_number,
+  body
+});
+}
