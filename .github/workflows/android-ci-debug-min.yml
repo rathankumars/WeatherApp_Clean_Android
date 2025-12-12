@@ -2,11 +2,9 @@ name: Android CI - Minimal Debug APK (Java 17)
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
   build-debug:
@@ -19,14 +17,8 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'   # AdoptOpenJDK/Temurin — works well; you can use 'zulu' or other vendors
+          distribution: 'temurin'
           java-version: '17'
-
-      - name: Print Java & Gradle versions (sanity check)
-        run: |
-          java -version
-          echo "JAVA_HOME = $JAVA_HOME"
-          ./gradlew --version
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
@@ -39,3 +31,19 @@ jobs:
         with:
           name: app-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+
+      - name: Comment APK download link on PR
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const artifactName = "app-debug-apk";
+            const artifactUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### 📱 Debug APK Ready\nDownload the Debug APK from the workflow artifacts:\n🔗 ${artifactUrl}\n(Artifact: **${artifactName}**)`
+            });
