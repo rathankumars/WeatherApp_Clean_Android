@@ -8,6 +8,7 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
+  actions: read
 
 jobs:
   build-and-comment:
@@ -26,14 +27,80 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew clean assembleDebug --no-daemon
+      # 🔹 Build ONLY the presentation module debug APK
+      - name: Build Presentation Debug APK
+        run: ./gradlew :presentation:clean :presentation:assembleDebug --no-daemon
 
-      - name: Upload Debug APK
+      - name: Get commit SHA
+        id: commit
+        run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Get commit number
+        id: commit_number
+        run: echo "number=$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Rename APK with commit info
+        run: |
+          APK_PATH=$(find presentation/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          COMMIT_SHA="${{ steps.commit.outputs.sha }}"
+          RUN_ID="${{ github.run_id }}"
+          COMMIT_NUMBER="${{ steps.commit_number.outputs.number }}"
+          APK_NAME="weather-app-commit-${COMMIT_SHA}-${COMMIT_NUMBER}-${RUN_ID}.apk"
+          cp "$APK_PATH" "$APK_NAME"
+          echo "APK_NAME=$APK_NAME" >> $GITHUB_ENV
+
+      # 🔹 Upload presentation module APK
+      - name: Upload Presentation Debug APK
+        id: upload-apk
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: weather-app-apk
+          path: ${{ env.APK_NAME }}
+          retention-days: 30
+
+      - name: Get Artifact Download URL
+        id: artifact-url
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Wait a moment for artifact to be available
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Get workflow run to find check suite ID
+            const { data: run } = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            
+            const { data: artifacts } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            
+            const artifact = artifacts.artifacts.find(a => a.name === 'weather-app-apk');
+            
+            if (artifact && run.check_suite_id) {
+              // Create direct download URL using check suite ID
+              // This format provides a direct download link
+              const downloadUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/suites/${run.check_suite_id}/artifacts/${artifact.id}`;
+              
+              core.setOutput('download_url', downloadUrl);
+              core.setOutput('artifact_id', artifact.id.toString());
+            } else if (artifact) {
+              // Fallback to run-based URL if check suite ID not available
+              const downloadUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}/artifacts/${artifact.id}`;
+              core.setOutput('download_url', downloadUrl);
+              core.setOutput('artifact_id', artifact.id.toString());
+            } else {
+              // Fallback to run URL if artifact not found yet
+              const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+              core.setOutput('download_url', runUrl);
+              core.setOutput('artifact_id', '');
+            }
 
       - name: Create or Update PR Comment with Artifact Link
         if: ${{ github.event_name == 'pull_request' }}
@@ -45,18 +112,152 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const issue_number = context.issue.number;
+            const currentCommitSha = "${{ steps.commit.outputs.sha }}";
+            const currentCommitNumber = "${{ steps.commit_number.outputs.number }}";
+            const currentRunId = context.runId;
+            const currentApkName = "${{ env.APK_NAME }}";
+            const currentDownloadUrl = "${{ steps.artifact-url.outputs.download_url }}";
+            const prBranch = context.payload.pull_request.head.ref;
 
-            // PR comment will always point to the workflow run artifacts page
-            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            // Get workflow ID from workflow file name
+            const workflowFileName = context.workflow.split('/').pop() || 'android-ci-debug-min.yml';
+            
+            // Fetch workflow runs - try by workflow file first, then by branch
+            let workflowRuns;
+            try {
+              const { data: workflows } = await github.rest.actions.listWorkflows({
+                owner,
+                repo,
+              });
+              const workflow = workflows.workflows.find(w => w.path.includes(workflowFileName));
+              
+              if (workflow) {
+                const { data: runs } = await github.rest.actions.listWorkflowRuns({
+                  owner,
+                  repo,
+                  workflow_id: workflow.id,
+                  branch: prBranch,
+                  per_page: 50
+                });
+                workflowRuns = runs;
+              } else {
+                // Fallback: get runs by branch
+                const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner,
+                  repo,
+                  branch: prBranch,
+                  per_page: 50
+                });
+                workflowRuns = runs;
+              }
+            } catch (error) {
+              // Fallback: get all runs for the branch
+              const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+                owner,
+                repo,
+                branch: prBranch,
+                per_page: 50
+              });
+              workflowRuns = runs;
+            }
 
-            // Build comment body safely (no YAML issues)
+            // Get artifacts from all successful runs
+            const apkHistory = [];
+            
+            for (const run of workflowRuns.workflow_runs) {
+              if (run.status === 'completed' && run.conclusion === 'success') {
+                try {
+                  const { data: artifacts } = await github.rest.actions.listWorkflowRunArtifacts({
+                    owner,
+                    repo,
+                    run_id: run.id,
+                  });
+                  
+                  const artifact = artifacts.artifacts.find(a => a.name === 'weather-app-apk');
+                  
+                  if (artifact) {
+                    // Get workflow run details to find check suite
+                    const { data: runDetails } = await github.rest.actions.getWorkflowRun({
+                      owner,
+                      repo,
+                      run_id: run.id,
+                    });
+                    
+                    // Get commit info
+                    const commitSha = run.head_sha.substring(0, 7);
+                    
+                    // Try to get commit number from git (if we can access the commit)
+                    let commitNumber = run.run_number; // Fallback to run number
+                    try {
+                      const { data: commit } = await github.rest.repos.getCommit({
+                        owner,
+                        repo,
+                        ref: run.head_sha
+                      });
+                      // We can't directly get commit count, so we'll use a sequential number
+                      // based on the run order
+                    } catch (e) {
+                      // Use run number as fallback
+                    }
+                    
+                    let downloadUrl = '';
+                    if (runDetails.check_suite_id) {
+                      downloadUrl = `https://github.com/${owner}/${repo}/suites/${runDetails.check_suite_id}/artifacts/${artifact.id}`;
+                    } else {
+                      downloadUrl = `https://github.com/${owner}/${repo}/actions/runs/${run.id}/artifacts/${artifact.id}`;
+                    }
+                    
+                    // Use run number as commit identifier (it's sequential)
+                    apkHistory.push({
+                      commitSha,
+                      commitNumber: run.run_number.toString(),
+                      runId: run.id,
+                      downloadUrl,
+                      createdAt: run.created_at,
+                      apkName: artifact.name
+                    });
+                  }
+                } catch (error) {
+                  console.log(`Error fetching artifacts for run ${run.id}: ${error.message}`);
+                }
+              }
+            }
+
+            // Sort by commit number (descending - newest first)
+            apkHistory.sort((a, b) => parseInt(b.commitNumber) - parseInt(a.commitNumber));
+
+            // Build history table
+            let historyTable = '';
+            if (apkHistory.length > 0) {
+              historyTable = [
+                "### 📋 APK History",
+                "",
+                "| Commit SHA | Build # | Download |",
+                "|------------|---------|----------|"
+              ].join("\n");
+              
+              for (const apk of apkHistory) {
+                const isCurrent = apk.runId === currentRunId;
+                const downloadLink = `[⬇️ Download](${apk.downloadUrl})`;
+                const commitDisplay = isCurrent ? `**\`${apk.commitSha}\`**` : `\`${apk.commitSha}\``;
+                historyTable += `\n| ${commitDisplay} | #${apk.runId} | ${downloadLink} |`;
+              }
+            }
+
+            // Build comment body
             const body = [
               marker,
-              "### 🚀 Debug APK is Ready",
-              "Download the APK from the workflow artifacts:",
-              `🔗 ${runUrl}`,
+              "## 📱 APK Build Successful",
               "",
-              "(This comment is auto-updated on every push)"
+              `**Commit:** \`${currentCommitSha}\` (Commit #${currentCommitNumber})`,
+              `**Build:** #${currentRunId}`,
+              "",
+              "### ⬇️ Download Latest APK",
+              `[Direct Download Link](${currentDownloadUrl})`,
+              "",
+              historyTable,
+              "",
+              "_(This comment is auto-updated on every push)_"
             ].join("\n");
 
             // 1. Fetch existing PR comments
@@ -69,19 +270,166 @@ jobs:
 
             const existing = comments.data.find(c => c.body && c.body.includes(marker));
 
-            // 2. Update if exists, otherwise create new
+            // 2. Always create/update at the end of conversation
             if (existing) {
-              await github.rest.issues.updateComment({
+              // Delete old comment and create new one at the end
+              await github.rest.issues.deleteComment({
                 owner,
                 repo,
-                comment_id: existing.id,
-                body
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number,
-                body
+                comment_id: existing.id
               });
             }
+            
+            // Create new comment (will be at the end)
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body
+            });
+
+      - name: Comment on commit
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const commitSha = context.sha;
+            const shortSha = "${{ steps.commit.outputs.sha }}";
+            const currentCommitNumber = "${{ steps.commit_number.outputs.number }}";
+            const currentRunId = context.runId;
+            const currentApkName = "${{ env.APK_NAME }}";
+            const currentDownloadUrl = "${{ steps.artifact-url.outputs.download_url }}";
+            const branch = context.ref.replace('refs/heads/', '');
+
+            // Get workflow ID from workflow file name
+            const workflowFileName = context.workflow.split('/').pop() || 'android-ci-debug-min.yml';
+            
+            // Fetch workflow runs - try by workflow file first, then by branch
+            let workflowRuns;
+            try {
+              const { data: workflows } = await github.rest.actions.listWorkflows({
+                owner,
+                repo,
+              });
+              const workflow = workflows.workflows.find(w => w.path.includes(workflowFileName));
+              
+              if (workflow) {
+                const { data: runs } = await github.rest.actions.listWorkflowRuns({
+                  owner,
+                  repo,
+                  workflow_id: workflow.id,
+                  branch: branch,
+                  per_page: 50
+                });
+                workflowRuns = runs;
+              } else {
+                // Fallback: get runs by branch
+                const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner,
+                  repo,
+                  branch: branch,
+                  per_page: 50
+                });
+                workflowRuns = runs;
+              }
+            } catch (error) {
+              // Fallback: get all runs for the branch
+              const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+                owner,
+                repo,
+                branch: branch,
+                per_page: 50
+              });
+              workflowRuns = runs;
+            }
+
+            // Get artifacts from all successful runs
+            const apkHistory = [];
+            
+            for (const run of workflowRuns.workflow_runs) {
+              if (run.status === 'completed' && run.conclusion === 'success') {
+                try {
+                  const { data: artifacts } = await github.rest.actions.listWorkflowRunArtifacts({
+                    owner,
+                    repo,
+                    run_id: run.id,
+                  });
+                  
+                  const artifact = artifacts.artifacts.find(a => a.name === 'weather-app-apk');
+                  
+                  if (artifact) {
+                    // Get workflow run details to find check suite
+                    const { data: runDetails } = await github.rest.actions.getWorkflowRun({
+                      owner,
+                      repo,
+                      run_id: run.id,
+                    });
+                    
+                    // Get commit info
+                    const commitShaShort = run.head_sha.substring(0, 7);
+                    
+                    let downloadUrl = '';
+                    if (runDetails.check_suite_id) {
+                      downloadUrl = `https://github.com/${owner}/${repo}/suites/${runDetails.check_suite_id}/artifacts/${artifact.id}`;
+                    } else {
+                      downloadUrl = `https://github.com/${owner}/${repo}/actions/runs/${run.id}/artifacts/${artifact.id}`;
+                    }
+                    
+                    // Use run number as commit identifier (it's sequential)
+                    apkHistory.push({
+                      commitSha: commitShaShort,
+                      commitNumber: run.run_number.toString(),
+                      runId: run.id,
+                      downloadUrl,
+                      createdAt: run.created_at,
+                      apkName: artifact.name
+                    });
+                  }
+                } catch (error) {
+                  console.log(`Error fetching artifacts for run ${run.id}: ${error.message}`);
+                }
+              }
+            }
+
+            // Sort by commit number (descending - newest first)
+            apkHistory.sort((a, b) => parseInt(b.commitNumber) - parseInt(a.commitNumber));
+
+            // Build history table
+            let historyTable = '';
+            if (apkHistory.length > 0) {
+              historyTable = [
+                "### 📋 APK History",
+                "",
+                "| Commit SHA | Build # | Download |",
+                "|------------|---------|----------|"
+              ].join("\n");
+              
+              for (const apk of apkHistory) {
+                const isCurrent = apk.runId === currentRunId;
+                const downloadLink = `[⬇️ Download](${apk.downloadUrl})`;
+                const commitDisplay = isCurrent ? `**\`${apk.commitSha}\`**` : `\`${apk.commitSha}\``;
+                historyTable += `\n| ${commitDisplay} | #${apk.runId} | ${downloadLink} |`;
+              }
+            }
+
+            const body = [
+              "## 📱 APK Build Successful",
+              "",
+              `**Commit:** \`${shortSha}\` (Commit #${currentCommitNumber})`,
+              `**Build:** #${currentRunId}`,
+              "",
+              "### ⬇️ Download Latest APK",
+              `[Direct Download Link](${currentDownloadUrl})`,
+              "",
+              historyTable
+            ].join("\n");
+
+            await github.rest.repos.createCommitComment({
+              owner,
+              repo,
+              commit_sha: commitSha,
+              body
+            });

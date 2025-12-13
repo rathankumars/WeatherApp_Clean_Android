@@ -1,0 +1,200 @@
+name: Unit Tests
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [domain, data, presentation]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+        
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+      
+    - name: Run unit tests for ${{ matrix.module }}
+      run: ./gradlew :${{ matrix.module }}:test --no-daemon
+      continue-on-error: true
+      
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ matrix.module }}
+        path: ${{ matrix.module }}/build/test-results/test/
+        retention-days: 7
+        if-no-files-found: ignore
+        
+    - name: Upload test reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-reports-${{ matrix.module }}
+        path: ${{ matrix.module }}/build/reports/tests/test/
+        retention-days: 7
+        if-no-files-found: ignore
+
+  test-summary:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download all test results
+      uses: actions/download-artifact@v4
+      with:
+        pattern: test-results-*
+        merge-multiple: false
+        
+    - name: Download all test reports
+      uses: actions/download-artifact@v4
+      with:
+        pattern: test-reports-*
+        merge-multiple: false
+        
+    - name: Generate test summary
+      id: test-summary
+      run: |
+        TOTAL_TESTS=0
+        PASSED_TESTS=0
+        FAILED_TESTS=0
+        DOMAIN_STATUS="❌"
+        DATA_STATUS="❌"
+        PRESENTATION_STATUS="❌"
+        
+        # Function to check module test results
+        check_module() {
+          local module=$1
+          local status_var="${module^^}_STATUS"
+          local module_tests=0
+          local module_failures=0
+          local module_errors=0
+          
+          # Find test results for this module
+          for xml_file in $(find . -path "*/test-results-$module/*" -name "TEST-*.xml" 2>/dev/null); do
+            TESTS=$(grep -o 'tests="[0-9]*"' "$xml_file" 2>/dev/null | awk -F'"' '{sum+=$2} END {print sum+0}')
+            FAILURES=$(grep -o 'failures="[0-9]*"' "$xml_file" 2>/dev/null | awk -F'"' '{sum+=$2} END {print sum+0}')
+            ERRORS=$(grep -o 'errors="[0-9]*"' "$xml_file" 2>/dev/null | awk -F'"' '{sum+=$2} END {print sum+0}')
+            module_tests=$((module_tests + TESTS))
+            module_failures=$((module_failures + FAILURES))
+            module_errors=$((module_errors + ERRORS))
+          done
+          
+          TOTAL_TESTS=$((TOTAL_TESTS + module_tests))
+          FAILED_TESTS=$((FAILED_TESTS + module_failures + module_errors))
+          
+          # Set status based on results
+          if [ $((module_failures + module_errors)) -eq 0 ] && [ $module_tests -gt 0 ]; then
+            eval "$status_var='✅'"
+          elif [ $module_tests -gt 0 ]; then
+            eval "$status_var='❌'"
+          fi
+        }
+        
+        # Check each module
+        check_module "domain"
+        check_module "data"
+        check_module "presentation"
+        
+        PASSED_TESTS=$((TOTAL_TESTS - FAILED_TESTS))
+        
+        echo "total=$TOTAL_TESTS" >> $GITHUB_OUTPUT
+        echo "passed=$PASSED_TESTS" >> $GITHUB_OUTPUT
+        echo "failed=$FAILED_TESTS" >> $GITHUB_OUTPUT
+        echo "domain_status=$DOMAIN_STATUS" >> $GITHUB_OUTPUT
+        echo "data_status=$DATA_STATUS" >> $GITHUB_OUTPUT
+        echo "presentation_status=$PRESENTATION_STATUS" >> $GITHUB_OUTPUT
+        
+    - name: Comment test results on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const marker = "<!-- unit-test-results -->";
+          const owner = context.repo.owner;
+          const repo = context.repo.repo;
+          const issue_number = context.issue.number;
+          const total = "${{ steps.test-summary.outputs.total }}" || "0";
+          const passed = "${{ steps.test-summary.outputs.passed }}" || "0";
+          const failed = "${{ steps.test-summary.outputs.failed }}" || "0";
+          const domainStatus = "${{ steps.test-summary.outputs.domain_status }}" || "❌";
+          const dataStatus = "${{ steps.test-summary.outputs.data_status }}" || "❌";
+          const presentationStatus = "${{ steps.test-summary.outputs.presentation_status }}" || "❌";
+          
+          // Overall status
+          const allPassed = failed == "0" && total != "0";
+          const status = allPassed ? "✅" : "❌";
+          const statusText = allPassed ? "Passed" : "Failed";
+          
+          const body = [
+            marker,
+            `## ${status} Unit Tests ${statusText}`,
+            "",
+            `**Total Tests:** ${total}`,
+            `**Passed:** ${passed}`,
+            `**Failed:** ${failed}`,
+            "",
+            "### Test Results by Module",
+            "",
+            "| Module | Status |",
+            "|--------|--------|",
+            `| domain | ${domainStatus} |`,
+            `| data | ${dataStatus} |`,
+            `| presentation | ${presentationStatus} |`,
+            "",
+            "Check the workflow logs for detailed test results.",
+            "",
+            "_(This comment is auto-updated on every push)_"
+          ].join("\n");
+          
+          // Fetch existing PR comments
+          const comments = await github.rest.issues.listComments({
+            owner,
+            repo,
+            issue_number,
+            per_page: 100
+          });
+          
+          const existing = comments.data.find(c => c.body && c.body.includes(marker));
+          
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner,
+              repo,
+              comment_id: existing.id,
+              body
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body
+            });
+          }
+
