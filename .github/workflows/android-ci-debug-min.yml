@@ -32,12 +32,31 @@ jobs:
       - name: Build Presentation Debug APK
         run: ./gradlew :presentation:clean :presentation:assembleDebug --no-daemon
 
+      - name: Get commit SHA
+        id: commit
+        run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Get commit number
+        id: commit_number
+        run: echo "number=$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Rename APK with commit info
+        run: |
+          APK_PATH=$(find presentation/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          COMMIT_SHA="${{ steps.commit.outputs.sha }}"
+          RUN_ID="${{ github.run_id }}"
+          COMMIT_NUMBER="${{ steps.commit_number.outputs.number }}"
+          APK_NAME="weather-app-commit-${COMMIT_SHA}-${COMMIT_NUMBER}-${RUN_ID}.apk"
+          cp "$APK_PATH" "$APK_NAME"
+          echo "APK_NAME=$APK_NAME" >> $GITHUB_ENV
+
       # 🔹 Upload presentation module APK
       - name: Upload Presentation Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: presentation-debug-apk
-          path: presentation/build/outputs/apk/debug/*.apk
+          name: weather-app-apk
+          path: ${{ env.APK_NAME }}
+          retention-days: 30
 
       - name: Create or Update PR Comment with Artifact Link
         if: ${{ github.event_name == 'pull_request' }}
@@ -49,18 +68,30 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const issue_number = context.issue.number;
+            const commitSha = "${{ steps.commit.outputs.sha }}";
+            const commitNumber = "${{ steps.commit_number.outputs.number }}";
+            const runId = context.runId;
+            const apkName = "${{ env.APK_NAME }}";
 
             // PR comment will always point to the workflow run artifacts page
-            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
 
             // Build comment body safely (no YAML issues)
             const body = [
               marker,
-              "### 🚀 Debug APK is Ready",
-              "Download the APK from the workflow artifacts:",
-              `🔗 ${runUrl}`,
+              "## 📱 APK Build Successful",
               "",
-              "(This comment is auto-updated on every push)"
+              `**Commit:** \`${commitSha}\` (Commit #${commitNumber})`,
+              `**Build:** #${runId}`,
+              "",
+              "### Download APK",
+              `🔗 [Download APK from Actions](${runUrl})`,
+              "",
+              "Or download directly from artifacts in the Actions tab.",
+              "",
+              `**APK Name:** \`${apkName}\``,
+              "",
+              "_(This comment is auto-updated on every push)_"
             ].join("\n");
 
             // 1. Fetch existing PR comments
@@ -89,3 +120,40 @@ jobs:
                 body
               });
             }
+
+      - name: Comment on commit
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const commitSha = context.sha;
+            const shortSha = "${{ steps.commit.outputs.sha }}";
+            const commitNumber = "${{ steps.commit_number.outputs.number }}";
+            const runId = context.runId;
+            const apkName = "${{ env.APK_NAME }}";
+
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
+
+            const body = [
+              "## 📱 APK Build Successful",
+              "",
+              `**Commit:** \`${shortSha}\` (Commit #${commitNumber})`,
+              `**Build:** #${runId}`,
+              "",
+              "### Download APK",
+              `🔗 [Download APK from Actions](${runUrl})`,
+              "",
+              "Or download directly from artifacts in the Actions tab.",
+              "",
+              `**APK Name:** \`${apkName}\``
+            ].join("\n");
+
+            await github.rest.repos.createCommitComment({
+              owner,
+              repo,
+              commit_sha: commitSha,
+              body
+            });
