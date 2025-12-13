@@ -234,15 +234,15 @@ jobs:
               historyTable = [
                 "### 📋 APK History",
                 "",
-                "| Commit # | Commit SHA | Build # | Download |",
-                "|----------|------------|---------|----------|"
+                "| Commit SHA | Build # | Download |",
+                "|------------|---------|----------|"
               ].join("\n");
               
               for (const apk of apkHistory) {
                 const isCurrent = apk.runId === currentRunId;
                 const downloadLink = `[⬇️ Download](${apk.downloadUrl})`;
                 const commitDisplay = isCurrent ? `**\`${apk.commitSha}\`**` : `\`${apk.commitSha}\``;
-                historyTable += `\n| #${apk.commitNumber} | ${commitDisplay} | #${apk.runId} | ${downloadLink} |`;
+                historyTable += `\n| ${commitDisplay} | #${apk.runId} | ${downloadLink} |`;
               }
             }
 
@@ -256,10 +256,6 @@ jobs:
               "",
               "### ⬇️ Download Latest APK",
               `[Direct Download Link](${currentDownloadUrl})`,
-              "",
-              `**APK Name:** \`${currentApkName}\``,
-              "",
-              "> 💡 Click the link above to download. You may need to be logged into GitHub.",
               "",
               historyTable,
               "",
@@ -409,15 +405,15 @@ jobs:
               historyTable = [
                 "### 📋 APK History",
                 "",
-                "| Commit # | Commit SHA | Build # | Download |",
-                "|----------|------------|---------|----------|"
+                "| Commit SHA | Build # | Download |",
+                "|------------|---------|----------|"
               ].join("\n");
               
               for (const apk of apkHistory) {
                 const isCurrent = apk.runId === currentRunId;
                 const downloadLink = `[⬇️ Download](${apk.downloadUrl})`;
                 const commitDisplay = isCurrent ? `**\`${apk.commitSha}\`**` : `\`${apk.commitSha}\``;
-                historyTable += `\n| #${apk.commitNumber} | ${commitDisplay} | #${apk.runId} | ${downloadLink} |`;
+                historyTable += `\n| ${commitDisplay} | #${apk.runId} | ${downloadLink} |`;
               }
             }
 
@@ -429,10 +425,6 @@ jobs:
               "",
               "### ⬇️ Download Latest APK",
               `[Direct Download Link](${currentDownloadUrl})`,
-              "",
-              `**APK Name:** \`${currentApkName}\``,
-              "",
-              "> 💡 Click the link above to download. You may need to be logged into GitHub.",
               "",
               historyTable
             ].join("\n");
