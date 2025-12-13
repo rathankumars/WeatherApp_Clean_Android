@@ -28,14 +28,16 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew clean assembleDebug --no-daemon
+      # 🔹 Build ONLY the presentation module debug APK
+      - name: Build Presentation Debug APK
+        run: ./gradlew :presentation:clean :presentation:assembleDebug --no-daemon
 
-      - name: Upload Debug APK
+      # 🔹 Upload presentation module APK
+      - name: Upload Presentation Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: presentation-debug-apk
+          path: presentation/build/outputs/apk/debug/*.apk
 
       - name: Create or Update PR Comment with Artifact Link
         if: ${{ github.event_name == 'pull_request' }}
